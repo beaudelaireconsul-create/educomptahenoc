@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>EduCompta</title>
+<style>
+:root{--bg:#f6f7f4;--card:#fff;--tx:#1d2420;--mu:#6b756e;--ac:#1f7a4d;--bd:#dfe3dc;--rd:#c0392b}
+@media(prefers-color-scheme:dark){:root{--bg:#121613;--card:#1b211d;--tx:#eef2ee;--mu:#9aa59d;--ac:#3fb67a;--bd:#2c352f;--rd:#e5705f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,sans-serif;padding:16px;max-width:640px;margin:auto}
+h1{font-size:20px;margin:0}.mu{color:var(--mu);font-size:12px}
+nav{display:flex;gap:6px;margin:12px 0}
+nav button{flex:1;padding:10px 4px;border:1px solid var(--bd);background:var(--card);color:var(--tx);border-radius:10px;font-size:13px}
+nav button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.big{font-size:20px;font-weight:700}
+input,select{width:100%;padding:11px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);font-size:15px;margin:4px 0 10px}
+label{font-size:12px;color:var(--mu)}
+.btn{background:var(--ac);color:#fff;border:0;border-radius:10px;padding:12px;width:100%;font-size:15px;font-weight:600}
+.btn.s{width:auto;padding:7px 12px;font-size:13px}.btn.l{background:none;color:var(--ac);border:1px solid var(--ac)}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--bd)}
+.bar{height:6px;background:var(--bd);border-radius:4px;overflow:hidden;margin:6px 0}.bar i{display:block;height:100%;background:var(--ac)}
+.late{color:var(--rd)}.err{color:var(--rd);font-size:13px}
+</style></head><body>
+<h1>🎓 EduCompta</h1><div class="mu" id="sub">Gestion des frais scolaires · FCFA</div>
+<nav id="nav"></nav><div id="app"></div>
+<script>
+const API=''; // même serveur ; sinon mettre l'URL de l'API
+let tok=localStorage.getItem('tok'),tab=tok?'dash':'login',msg='',PT='';
+const f=n=>Number(n).toLocaleString('fr-FR')+' F';
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const v=i=>document.getElementById(i).value.trim();
+async function api(p,o={}){
+  const r=await fetch(API+'/api'+p,{...o,headers:{'Content-Type':'application/json',...(tok?{Authorization:'Bearer '+tok}:{})},body:o.body&&JSON.stringify(o.body)});
+  const d=r.status===204?{}:await r.json().catch(()=>({}));
+  if(r.status===401&&tok){logout();return{}}
+  if(!r.ok)throw new Error(d.error||'Erreur');return d}
+function logout(){localStorage.removeItem('tok');tok=null;tab='login';render()}
+function setTab(t){tab=t;msg='';render()}
+async function render(){
+  const N=document.getElementById('nav'),A=document.getElementById('app');
+  N.innerHTML=tok?['dash:Accueil','eleves:Élèves','pay:Paiement'].map(x=>{const[a,b]=x.split(':');return`<button class="${tab===a?'on':''}" onclick="setTab('${a}')">${b}</button>`}).join('')+'<button onclick="logout()">Quitter</button>':'';
+  try{
+  if(tab==='login'||tab==='register'){const reg=tab==='register';
+    A.innerHTML=`<div class="card"><b>${reg?'Créer le compte de votre école':'Connexion directeur'}</b><br>${reg?'<label>Nom de l\'école</label><input id="sc">':''}<label>Email</label><input id="em" type="email"><label>Mot de passe (8+ caractères)</label><input id="pw" type="password"><div class="err">${esc(msg)}</div><button class="btn" onclick="auth(${reg})">${reg?'Créer mon espace':'Se connecter'}</button><br><br><button class="btn l" onclick="setTab('${reg?'login':'register'}')">${reg?'J\'ai déjà un compte':'Inscrire mon école'}</button><br><br><button class="btn l" onclick="setTab('parent')">👨‍👩‍👧 Je suis parent</button></div>`;return}
+  if(tab==='dash'){const d=await api('/dashboard'),s=await api('/students'),imp=s.filter(e=>e.paid<e.total_fee);
+    A.innerHTML=`<div class="grid"><div class="card"><div class="mu">Encaissé</div><div class="big">${f(d.paid)}</div></div><div class="card"><div class="mu">Reste à payer</div><div class="big late">${f(d.remaining)}</div></div></div><div class="card"><div class="mu">Recouvrement</div><div class="big">${d.rate}%</div><div class="bar"><i style="width:${d.rate}%"></i></div></div><div class="card"><b>Impayés (${imp.length})</b>${imp.map(e=>`<div class="row"><div>${esc(e.name)}<div class="mu">${esc(e.class)} · ${esc(e.parent_phone)}</div></div><b class="late">${f(e.total_fee-e.paid)}</b></div>`).join('')||'<p class="mu">Aucun impayé.</p>'}</div>`}
+  if(tab==='eleves'){const s=await api('/students');
+    A.innerHTML=`<div class="card"><b>Ajouter un élève</b><br><label>Nom</label><input id="n"><label>Classe</label><input id="c"><label>Téléphone du parent</label><input id="t" type="tel"><label>Frais annuels (F)</label><input id="m" type="number" inputmode="numeric"><div class="err">${esc(msg)}</div><button class="btn" onclick="addS()">Ajouter</button></div><div class="card"><b>Élèves (${s.length})</b>${s.map(e=>`<div class="row"><div>${esc(e.name)}<div class="mu">${esc(e.class)} · ${f(e.paid)} / ${f(e.total_fee)}</div></div><button class="btn s" style="background:var(--rd)" onclick="delS(${e.id})">✕</button></div>`).join('')}</div>`}
+  if(tab==='pay'){const s=await api('/students');
+    A.innerHTML=`<div class="card"><b>Paiement reçu (espèces, dépôt…)</b><br><label>Élève</label><select id="e">${s.map(e=>`<option value="${e.id}">${esc(e.name)} (reste ${f(e.total_fee-e.paid)})</option>`).join('')}</select><label>Montant (F)</label><input id="a" type="number" inputmode="numeric"><label>Moyen</label><select id="md"><option>Espèces</option><option>Virement</option><option>MTN MoMo</option><option>Moov Money</option></select><div class="err">${esc(msg)}</div><button class="btn" onclick="payM()">Enregistrer</button></div>`}
+  if(tab==='parent'){let h=`<div class="card"><b>👨‍👩‍👧 Espace parent</b><p class="mu">Numéro de téléphone donné à l'école.</p><input id="pt" type="tel" value="${esc(PT)}"><button class="btn" onclick="PT=v('pt');render()">Voir mes factures</button>${tok?'':'<br><br><button class="btn l" onclick="setTab(\'login\')">← Retour</button>'}</div>`;
+    if(PT){const s=await api('/parent/students?phone='+encodeURIComponent(PT));if(!s.length)h+='<div class="card mu">Aucun élève trouvé.</div>';
+    s.forEach(e=>{const r=e.total_fee-e.paid;h+=`<div class="card"><b>${esc(e.name)}</b> <span class="mu">${esc(e.class)}</span><div class="bar"><i style="width:${e.total_fee?e.paid/e.total_fee*100:0}%"></i></div><div class="row"><span class="mu">Payé</span><b>${f(e.paid)}</b></div><div class="row"><span class="mu">Reste</span><b class="${r?'late':''}">${f(r)}</b></div>${r>0?`<label>Montant (F)</label><input id="pa${e.id}" type="number" value="${r}"><button class="btn" onclick="parentPay(${e.id})">Payer (MoMo / Moov / carte)</button>`:'<p>✅ Soldé</p>'}</div>`})}
+    h+=`<div class="err">${esc(msg)}</div>`;A.innerHTML=h}
+  }catch(e){msg=e.message;A.innerHTML=`<div class="card err">${esc(e.message)}</div>`}}
+async function auth(reg){try{const b={email:v('em'),password:v('pw')};if(reg)b.school=v('sc');
+  const d=await api('/auth/'+(reg?'register':'login'),{method:'POST',body:b});tok=d.token;localStorage.setItem('tok',tok);tab='dash';msg='';render()}catch(e){msg=e.message;render()}}
+async function addS(){try{await api('/students',{method:'POST',body:{name:v('n'),class:v('c'),parent_phone:v('t'),total_fee:+v('m')}});msg='';render()}catch(e){msg=e.message;render()}}
+async function delS(id){if(confirm('Supprimer ?')){await api('/students/'+id,{method:'DELETE'});render()}}
+async function payM(){try{await api('/payments',{method:'POST',body:{student_id:+v('e'),amount:+v('a'),method:v('md')}});msg='';setTab('dash')}catch(e){msg=e.message;render()}}
+async function parentPay(id){try{const d=await api('/parent/pay',{method:'POST',body:{student_id:id,amount:+v('pa'+id),phone:PT}});location.href=d.payment_url}catch(e){msg=e.message;render()}}
+render();
+</script></body></html>
