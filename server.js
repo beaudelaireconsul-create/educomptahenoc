@@ -12,7 +12,39 @@ const pool = new Pool({ connectionString: DATABASE_URL,
   ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false } });
 const q = (text, params) => pool.query(text, params);
 const h = fn => (req, res, next) => fn(req, res).catch(next);
-const normPhone = p => String(p || '').replace(/\D/g, '');
+const COUNTRIES = {
+  BJ: { name: 'Bénin', dial: '229', cur: 'XOF', keep0: true, pay: 'fedapay' },
+  TG: { name: 'Togo', dial: '228', cur: 'XOF', pay: 'fedapay' },
+  CI: { name: "Côte d'Ivoire", dial: '225', cur: 'XOF', keep0: true, pay: 'fedapay' },
+  SN: { name: 'Sénégal', dial: '221', cur: 'XOF', pay: 'fedapay' },
+  ML: { name: 'Mali', dial: '223', cur: 'XOF', pay: 'fedapay' },
+  BF: { name: 'Burkina Faso', dial: '226', cur: 'XOF', pay: 'fedapay' },
+  NE: { name: 'Niger', dial: '227', cur: 'XOF', pay: 'fedapay' },
+  GN: { name: 'Guinée', dial: '224', cur: 'GNF', pay: 'fedapay' },
+  CM: { name: 'Cameroun', dial: '237', cur: 'XAF' },
+  GA: { name: 'Gabon', dial: '241', cur: 'XAF' },
+  CG: { name: 'Congo', dial: '242', cur: 'XAF' },
+  CD: { name: 'RD Congo', dial: '243', cur: 'CDF' },
+  NG: { name: 'Nigeria', dial: '234', cur: 'NGN' },
+  GH: { name: 'Ghana', dial: '233', cur: 'GHS' },
+  KE: { name: 'Kenya', dial: '254', cur: 'KES' },
+  UG: { name: 'Ouganda', dial: '256', cur: 'UGX' },
+  RW: { name: 'Rwanda', dial: '250', cur: 'RWF' },
+  TZ: { name: 'Tanzanie', dial: '255', cur: 'TZS' },
+  MA: { name: 'Maroc', dial: '212', cur: 'MAD' }
+};
+const country = cc => COUNTRIES[cc] ? cc : 'BJ';
+// Numéro canonique = indicatif + numéro national (sert à retrouver un parent quel que soit le format saisi)
+const normPhone = (p, cc) => {
+  const c = COUNTRIES[country(cc)];
+  let d = String(p || '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.startsWith(c.dial) && d.length >= c.dial.length + 8) d = d.slice(c.dial.length);
+  if (c.keep0) { if (country(cc) === 'BJ' && d.length === 8) d = '01' + d; }
+  else d = d.replace(/^0+/, '');
+  return c.dial + d;
+};
+const ccOf = req => country(req.user && req.user.cc);
 const isId = v => Number.isInteger(Number(v)) && Number(v) > 0;
 const paidSum = `COALESCE((SELECT SUM(amount) FROM payments WHERE student_id=s.id AND status='paid'),0)::int`;
 
@@ -37,6 +69,8 @@ CREATE TABLE IF NOT EXISTS payments (
   status TEXT NOT NULL DEFAULT 'paid' CHECK (status IN ('pending','paid','failed')),
   provider_ref TEXT UNIQUE, created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS idx_pay_student ON payments(student_id);
+ALTER TABLE schools ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT 'BJ';
+ALTER TABLE schools ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'XOF';
 `;
 
 const app = express(); app.use(cors());
@@ -56,7 +90,7 @@ app.post('/api/webhooks/fedapay', express.raw({ type: '*/*' }), h(async (req, re
 app.use(express.json());
 
 // ---- Auth ----
-const sign = u => jwt.sign({ uid: u.id, sid: u.school_id, role: u.role }, JWT_SECRET, { expiresIn: '7d' });
+const sign = u => jwt.sign({ uid: u.id, sid: u.school_id, role: u.role, cc: u.cc }, JWT_SECRET, { expiresIn: '7d' });
 const auth = (req, res, next) => {
   try { req.user = jwt.verify((req.get('authorization') || '').replace('Bearer ', ''), JWT_SECRET); next(); }
   catch { res.status(401).json({ error: 'Non autorisé' }); }
@@ -66,16 +100,25 @@ app.post('/api/auth/register', h(async (req, res) => {
   const { school, email, password } = req.body;
   if (!school || !email || !password || password.length < 8) return res.status(400).json({ error: 'Champs invalides (mot de passe 8+ car.)' });
   if ((await q('SELECT 1 FROM users WHERE email=$1', [email])).rowCount) return res.status(409).json({ error: 'Email déjà utilisé' });
-  const sid = (await q('INSERT INTO schools(name) VALUES($1) RETURNING id', [school])).rows[0].id;
+  const cc = country(req.body.country);
+  const sid = (await q('INSERT INTO schools(name,country,currency) VALUES($1,$2,$3) RETURNING id', [school, cc, COUNTRIES[cc].cur])).rows[0].id;
   const uid = (await q('INSERT INTO users(school_id,email,password_hash) VALUES($1,$2,$3) RETURNING id',
     [sid, email, bcrypt.hashSync(password, 10)])).rows[0].id;
-  res.json({ token: sign({ id: uid, school_id: sid, role: 'director' }) });
+  res.json({ token: sign({ id: uid, school_id: sid, role: 'director', cc }) });
 }));
 
 app.post('/api/auth/login', h(async (req, res) => {
-  const u = (await q('SELECT * FROM users WHERE email=$1', [req.body.email])).rows[0];
+  const u = (await q('SELECT u.*, s.country AS cc FROM users u JOIN schools s ON s.id=u.school_id WHERE u.email=$1', [req.body.email])).rows[0];
   if (!u || !bcrypt.compareSync(req.body.password || '', u.password_hash)) return res.status(401).json({ error: 'Identifiants incorrects' });
   res.json({ token: sign(u) });
+}));
+
+app.get('/api/countries', (req, res) => res.json(Object.entries(COUNTRIES).map(([code, c]) =>
+  ({ code, name: c.name, dial: c.dial, currency: c.cur, online: c.pay === 'fedapay' }))));
+
+app.get('/api/me', auth, h(async (req, res) => {
+  const r = (await q('SELECT name, country, currency FROM schools WHERE id=$1', [req.user.sid])).rows[0];
+  res.json({ school: r.name, country: r.country, currency: r.currency, dial: COUNTRIES[country(r.country)].dial });
 }));
 
 // ---- Élèves (directeur) ----
@@ -87,7 +130,7 @@ app.post('/api/students', auth, h(async (req, res) => {
   const { name, class: cls, parent_phone, total_fee } = req.body;
   if (!name || !parent_phone || !(total_fee >= 0)) return res.status(400).json({ error: 'Champs invalides' });
   const r = await q('INSERT INTO students(school_id,name,class,parent_phone,total_fee) VALUES($1,$2,$3,$4,$5) RETURNING id',
-    [req.user.sid, name, cls || '', normPhone(parent_phone), Math.round(total_fee)]);
+    [req.user.sid, name, cls || '', normPhone(parent_phone, ccOf(req)), Math.round(total_fee)]);
   res.status(201).json({ id: r.rows[0].id });
 }));
 
@@ -118,19 +161,24 @@ app.get('/api/dashboard', auth, h(async (req, res) => {
 // ---- Espace parent (par téléphone) ----
 // TODO production : ajouter un code OTP par SMS avant d'afficher ces données.
 app.get('/api/parent/students', h(async (req, res) => {
-  res.json((await q(`SELECT s.id, s.name, s.class, s.total_fee, ${paidSum} AS paid FROM students s WHERE parent_phone=$1`,
-    [normPhone(req.query.phone)])).rows);
+  const cc = country(req.query.cc);
+  const rows = (await q(`SELECT s.id, s.name, s.class, s.total_fee, sc.currency, sc.country, ${paidSum} AS paid
+    FROM students s JOIN schools sc ON sc.id=s.school_id WHERE s.parent_phone=$1`, [normPhone(req.query.phone, cc)])).rows;
+  res.json(rows.map(r => ({ ...r, online: COUNTRIES[country(r.country)].pay === 'fedapay' })));
 }));
 
 app.post('/api/parent/pay', h(async (req, res) => {
-  const { student_id, amount, phone } = req.body;
+  const { student_id, amount, phone } = req.body, cc = country(req.body.cc);
   if (!isId(student_id)) return res.status(400).json({ error: 'Demande invalide' });
-  const s = (await q(`SELECT s.*, ${paidSum} AS paid FROM students s WHERE id=$1 AND parent_phone=$2`, [student_id, normPhone(phone)])).rows[0];
+  const s = (await q(`SELECT s.*, sc.currency, sc.country, ${paidSum} AS paid FROM students s JOIN schools sc ON sc.id=s.school_id
+    WHERE s.id=$1 AND s.parent_phone=$2`, [student_id, normPhone(phone, cc)])).rows[0];
   if (!s || !(amount > 0) || amount > s.total_fee - s.paid) return res.status(400).json({ error: 'Demande invalide' });
+  if (COUNTRIES[country(s.country)].pay !== 'fedapay')
+    return res.status(400).json({ error: "Paiement en ligne bientôt disponible dans votre pays. Payez directement auprès de l'école." });
   try {
     const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${FEDAPAY_SECRET_KEY}` };
     const tx = await (await fetch(`${FEDAPAY_API}/transactions`, { method: 'POST', headers: H, body: JSON.stringify({
-      description: `Scolarité - ${s.name}`, amount: Math.round(amount), currency: { iso: 'XOF' },
+      description: `Scolarité - ${s.name}`, amount: Math.round(amount), currency: { iso: s.currency },
       callback_url: `${PUBLIC_URL}/` }) })).json();
     const id = (tx['v1/transaction'] || tx).id;
     const tk = await (await fetch(`${FEDAPAY_API}/transactions/${id}/token`, { method: 'POST', headers: H })).json();
