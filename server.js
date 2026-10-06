@@ -1,7 +1,8 @@
  require('dotenv').config();
-const express = require('express'), cors = require('cors'), crypto = require('crypto');
+const express = require('express'), cors = require('cors');
 const bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken');
 const { Pool } = require('pg'), fs = require('fs');
+const { Webhook } = require('fedapay');
 
 const { DATABASE_URL, JWT_SECRET, FEDAPAY_SECRET_KEY, FEDAPAY_WEBHOOK_SECRET, FEDAPAY_API, PUBLIC_URL } = process.env;
 if (!DATABASE_URL) { console.error('ERREUR : la variable DATABASE_URL est manquante.'); process.exit(1); }
@@ -42,13 +43,12 @@ const app = express(); app.use(cors());
 
 // ---- Webhook FedaPay (corps brut, AVANT express.json) ----
 app.post('/api/webhooks/fedapay', express.raw({ type: '*/*' }), h(async (req, res) => {
-  const sig = req.get('x-fedapay-signature') || '';
-  const t = (sig.match(/t=(\d+)/) || [])[1], s = (sig.match(/s=([a-f0-9]+)/) || [])[1];
-  const expected = crypto.createHmac('sha256', FEDAPAY_WEBHOOK_SECRET || '').update(`${t}.${req.body}`).digest('hex');
-  if (!s || s.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(s), Buffer.from(expected)))
-    return res.sendStatus(400);
-  const ev = JSON.parse(req.body), tx = ev.entity || {};
-  const status = ev.name === 'transaction.approved' ? 'paid' : ev.name === 'transaction.declined' ? 'failed' : null;
+  const body = req.body.toString('utf8');
+  try { Webhook.constructEvent(body, req.get('x-fedapay-signature') || '', FEDAPAY_WEBHOOK_SECRET || ''); }
+  catch (e) { console.error('Signature webhook invalide'); return res.sendStatus(400); }
+  const ev = JSON.parse(body), tx = ev.entity || {};
+  const status = ['transaction.approved', 'transaction.transferred'].includes(ev.name) ? 'paid'
+    : ['transaction.canceled', 'transaction.declined'].includes(ev.name) ? 'failed' : null;
   if (status) await q('UPDATE payments SET status=$1 WHERE provider_ref=$2', [status, String(tx.id)]);
   res.sendStatus(200);
 }));
@@ -131,7 +131,7 @@ app.post('/api/parent/pay', h(async (req, res) => {
     const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${FEDAPAY_SECRET_KEY}` };
     const tx = await (await fetch(`${FEDAPAY_API}/transactions`, { method: 'POST', headers: H, body: JSON.stringify({
       description: `Scolarité - ${s.name}`, amount: Math.round(amount), currency: { iso: 'XOF' },
-      callback_url: `${PUBLIC_URL}/api/webhooks/fedapay` }) })).json();
+      callback_url: `${PUBLIC_URL}/` }) })).json();
     const id = (tx['v1/transaction'] || tx).id;
     const tk = await (await fetch(`${FEDAPAY_API}/transactions/${id}/token`, { method: 'POST', headers: H })).json();
     await q("INSERT INTO payments(school_id,student_id,amount,method,status,provider_ref) VALUES($1,$2,$3,'FedaPay','pending',$4)",
