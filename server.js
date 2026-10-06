@@ -1,5 +1,5 @@
  require('dotenv').config();
-const express = require('express'), cors = require('cors');
+const express = require('express'), cors = require('cors'), crypto = require('crypto');
 const bcrypt = require('bcryptjs'), jwt = require('jsonwebtoken');
 const { Pool } = require('pg'), fs = require('fs');
 const { Webhook } = require('fedapay');
@@ -45,6 +45,12 @@ const normPhone = (p, cc) => {
   return c.dial + d;
 };
 const ccOf = req => country(req.user && req.user.cc);
+const ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const newCode = () => Array.from({ length: 6 }, () => ALPHA[crypto.randomInt(ALPHA.length)]).join('');
+const normCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const fails = new Map(); // anti-devinette : 10 échecs / 15 min / adresse IP
+const blocked = req => (fails.get(req.ip) || []).filter(t => Date.now() - t < 900000).length >= 10;
+const failed = req => fails.set(req.ip, [...(fails.get(req.ip) || []).filter(t => Date.now() - t < 900000), Date.now()]);
 const isId = v => Number.isInteger(Number(v)) && Number(v) > 0;
 const paidSum = `COALESCE((SELECT SUM(amount) FROM payments WHERE student_id=s.id AND status='paid'),0)::int`;
 
@@ -71,9 +77,11 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_pay_student ON payments(student_id);
 ALTER TABLE schools ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT 'BJ';
 ALTER TABLE schools ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'XOF';
+ALTER TABLE students ADD COLUMN IF NOT EXISTS access_code TEXT;
+UPDATE students SET access_code = upper(substr(md5(random()::text || id::text), 1, 6)) WHERE access_code IS NULL;
 `;
 
-const app = express(); app.use(cors());
+const app = express(); app.set('trust proxy', 1); app.use(cors());
 
 // ---- Webhook FedaPay (corps brut, AVANT express.json) ----
 app.post('/api/webhooks/fedapay', express.raw({ type: '*/*' }), h(async (req, res) => {
@@ -129,9 +137,10 @@ app.get('/api/students', auth, h(async (req, res) => {
 app.post('/api/students', auth, h(async (req, res) => {
   const { name, class: cls, parent_phone, total_fee } = req.body;
   if (!name || !parent_phone || !(total_fee >= 0)) return res.status(400).json({ error: 'Champs invalides' });
-  const r = await q('INSERT INTO students(school_id,name,class,parent_phone,total_fee) VALUES($1,$2,$3,$4,$5) RETURNING id',
-    [req.user.sid, name, cls || '', normPhone(parent_phone, ccOf(req)), Math.round(total_fee)]);
-  res.status(201).json({ id: r.rows[0].id });
+  const code = newCode();
+  const r = await q('INSERT INTO students(school_id,name,class,parent_phone,total_fee,access_code) VALUES($1,$2,$3,$4,$5,$6) RETURNING id',
+    [req.user.sid, name, cls || '', normPhone(parent_phone, ccOf(req)), Math.round(total_fee), code]);
+  res.status(201).json({ id: r.rows[0].id, access_code: code });
 }));
 
 app.delete('/api/students/:id', auth, h(async (req, res) => {
@@ -158,20 +167,24 @@ app.get('/api/dashboard', auth, h(async (req, res) => {
   res.json({ due, paid, remaining: due - paid, rate: due ? Math.round(paid / due * 100) : 0 });
 }));
 
-// ---- Espace parent (par téléphone) ----
-// TODO production : ajouter un code OTP par SMS avant d'afficher ces données.
+// ---- Espace parent (téléphone + code d'accès) ----
 app.get('/api/parent/students', h(async (req, res) => {
+  if (blocked(req)) return res.status(429).json({ error: 'Trop de tentatives. Réessayez dans 15 minutes.' });
   const cc = country(req.query.cc);
   const rows = (await q(`SELECT s.id, s.name, s.class, s.total_fee, sc.currency, sc.country, ${paidSum} AS paid
-    FROM students s JOIN schools sc ON sc.id=s.school_id WHERE s.parent_phone=$1`, [normPhone(req.query.phone, cc)])).rows;
+    FROM students s JOIN schools sc ON sc.id=s.school_id WHERE s.parent_phone=$1 AND s.access_code=$2`,
+    [normPhone(req.query.phone, cc), normCode(req.query.code)])).rows;
+  if (!rows.length) failed(req);
   res.json(rows.map(r => ({ ...r, online: COUNTRIES[country(r.country)].pay === 'fedapay' })));
 }));
 
 app.post('/api/parent/pay', h(async (req, res) => {
   const { student_id, amount, phone } = req.body, cc = country(req.body.cc);
+  if (blocked(req)) return res.status(429).json({ error: 'Trop de tentatives. Réessayez dans 15 minutes.' });
   if (!isId(student_id)) return res.status(400).json({ error: 'Demande invalide' });
   const s = (await q(`SELECT s.*, sc.currency, sc.country, ${paidSum} AS paid FROM students s JOIN schools sc ON sc.id=s.school_id
-    WHERE s.id=$1 AND s.parent_phone=$2`, [student_id, normPhone(phone, cc)])).rows[0];
+    WHERE s.id=$1 AND s.parent_phone=$2 AND s.access_code=$3`, [student_id, normPhone(phone, cc), normCode(req.body.code)])).rows[0];
+  if (!s) failed(req);
   if (!s || !(amount > 0) || amount > s.total_fee - s.paid) return res.status(400).json({ error: 'Demande invalide' });
   if (COUNTRIES[country(s.country)].pay !== 'fedapay')
     return res.status(400).json({ error: "Paiement en ligne bientôt disponible dans votre pays. Payez directement auprès de l'école." });
