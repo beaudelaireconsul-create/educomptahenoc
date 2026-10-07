@@ -203,7 +203,38 @@ app.post('/api/parent/pay', h(async (req, res) => {
 
 // ---- Pages et erreurs ----
 const pub = fs.existsSync(__dirname + '/public/index.html') ? __dirname + '/public/index.html' : __dirname + '/index.html';
-app.get('/', (req, res) => res.sendFile(pub));
+// ---- Application installable (PWA) : manifeste, icônes, service worker ----
+const zlib = require('zlib');
+const crcT = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = b => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td)); return Buffer.concat([len, td, crc]); };
+function makeIcon(size) {
+  const row = size * 3 + 1, raw = Buffer.alloc(row * size), u = size / 100;
+  const box = (x, y, x0, y0, x1, y1) => x >= x0 * u && x < x1 * u && y >= y0 * u && y < y1 * u;
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const e = box(x, y, 32, 26, 43, 74) || box(x, y, 32, 26, 68, 37) || box(x, y, 32, 44.5, 64, 55.5) || box(x, y, 32, 63, 68, 74);
+    const c = e ? [255, 255, 255] : [31, 122, 77], o = y * row + 1 + x * 3;
+    raw[o] = c[0]; raw[o + 1] = c[1]; raw[o + 2] = c[2];
+  }
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(size, 0); ihdr.writeUInt32BE(size, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+const ICONS = { 192: makeIcon(192), 512: makeIcon(512) };
+const page = fs.readFileSync(pub, 'utf8')
+  .replace('</head>', '<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#1f7a4d"><link rel="apple-touch-icon" href="/icon-192.png"></head>')
+  .replace('</body>', "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js')</script></body>");
+app.get('/', (req, res) => res.type('html').send(page));
+app.get('/manifest.webmanifest', (req, res) => res.type('application/manifest+json').send(JSON.stringify({
+  name: 'EduCompta', short_name: 'EduCompta', description: 'Gestion des frais scolaires', lang: 'fr',
+  start_url: '/', scope: '/', display: 'standalone', background_color: '#f6f7f4', theme_color: '#1f7a4d',
+  icons: [
+    { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+    { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }] })));
+app.get('/icon-:s.png', (req, res) => { const b = ICONS[req.params.s]; if (!b) return res.sendStatus(404); res.type('png').set('Cache-Control', 'public, max-age=86400').send(b); });
+app.get('/sw.js', (req, res) => res.type('text/javascript').send(
+  "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));" +
+  "self.addEventListener('fetch',e=>{if(e.request.method==='GET')e.respondWith(fetch(e.request).catch(()=>new Response('Hors ligne / Offline',{status:503})))});"));
 app.use(express.static(__dirname + '/public'));
 app.use((err, req, res, next) => {
   console.error(err);
