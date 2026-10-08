@@ -114,7 +114,7 @@ async function auth(reg){try{const b={email:v('em'),password:v('pw')};if(reg){b.
   const d=await api('/auth/'+(reg?'register':'login'),{method:'POST',body:b});tok=d.token;localStorage.setItem('tok',tok);me=null;tab='dash';msg='';render()}catch(e){msg=e.message;render()}}
 async function addS(){try{const d=await api('/students',{method:'POST',body:{name:v('n'),class:v('c'),parent_phone:v('t'),total_fee:+v('m')}});msg='';note=t('newcode')+' '+d.access_code;render()}catch(e){msg=e.message;render()}}
 async function delS(id){if(confirm(t('del'))){await api('/students/'+id,{method:'DELETE'});render()}}
-async function payM(){try{await api('/payments',{method:'POST',body:{student_id:+v('e'),amount:+v('a'),method:v('md')}});msg='';setTab('dash')}catch(e){msg=e.m
+async function payM(){try{await api('/payments',{method:'POST',body:{student_id:+v('e'),amount:+v('a'),method:v('md')}});msg='';setTab('dash')}catch(e){msg=e.message;render()}}
 async function parentPay(id){try{const d=await api('/parent/pay',{method:'POST',body:{student_id:id,amount:+v('pa'+id),phone:PT,cc:PCC,code:PK}});location.href=d.payment_url}catch(e){msg=e.message;render()}}
 render();
 (async()=>{try{C=await api('/countries')}catch(e){C=[]}render()})();
